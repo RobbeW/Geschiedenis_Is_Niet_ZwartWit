@@ -1,15 +1,15 @@
-from numpy import ndarray
+from fastai.basic_data import DatasetType
+from fastai.basic_train import Learner
 from abc import ABC, abstractmethod
-from .critics import colorize_crit_learner
 from fastai.core import *
 from fastai.vision import *
 from fastai.vision.image import *
 from fastai.vision.data import *
 from fastai import *
-import math
-from scipy import misc
 import cv2
 from PIL import Image as PilImage
+from deoldify import device as device_settings
+import logging
 
 
 class IFilter(ABC):
@@ -24,6 +24,10 @@ class BaseFilter(IFilter):
     def __init__(self, learn: Learner, stats: tuple = imagenet_stats):
         super().__init__()
         self.learn = learn
+        
+        if not device_settings.is_gpu():
+            self.learn.model = self.learn.model.cpu()
+        
         self.device = next(self.learn.model.parameters()).device
         self.norm, self.denorm = normalize_funcs(*stats)
 
@@ -55,7 +59,7 @@ class BaseFilter(IFilter):
         except RuntimeError as rerr:
             if 'memory' not in str(rerr):
                 raise rerr
-            print('Warning: render_factor was set too high, and out of memory error resulted. Returning original image.')
+            logging.warn('Warning: render_factor was set too high, and out of memory error resulted. Returning original image.')
             return model_image
             
         out = result[0]
@@ -96,18 +100,18 @@ class ColorizerFilter(BaseFilter):
     def _post_process(self, raw_color: PilImage, orig: PilImage) -> PilImage:
         color_np = np.asarray(raw_color)
         orig_np = np.asarray(orig)
-        color_yuv = cv2.cvtColor(color_np, cv2.COLOR_BGR2YUV)
+        color_yuv = cv2.cvtColor(color_np, cv2.COLOR_RGB2YUV)
         # do a black and white transform first to get better luminance values
-        orig_yuv = cv2.cvtColor(orig_np, cv2.COLOR_BGR2YUV)
+        orig_yuv = cv2.cvtColor(orig_np, cv2.COLOR_RGB2YUV)
         hires = np.copy(orig_yuv)
         hires[:, :, 1:3] = color_yuv[:, :, 1:3]
-        final = cv2.cvtColor(hires, cv2.COLOR_YUV2BGR)
+        final = cv2.cvtColor(hires, cv2.COLOR_YUV2RGB)
         final = PilImage.fromarray(final)
         return final
 
 
 class MasterFilter(BaseFilter):
-    def __init__(self, filters: [IFilter], render_factor: int):
+    def __init__(self, filters: List[IFilter], render_factor: int):
         self.filters = filters
         self.render_factor = render_factor
 

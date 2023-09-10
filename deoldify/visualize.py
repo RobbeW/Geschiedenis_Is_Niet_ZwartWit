@@ -1,15 +1,11 @@
 from fastai.core import *
 from fastai.vision import *
 from matplotlib.axes import Axes
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from .filters import IFilter, MasterFilter, ColorizerFilter
 from .generators import gen_inference_deep, gen_inference_wide
-from tensorboardX import SummaryWriter
-from scipy import misc
 from PIL import Image
 import ffmpeg
-import youtube_dl
+import yt_dlp as youtube_dl
 import gc
 import requests
 from io import BytesIO
@@ -18,7 +14,7 @@ from IPython import display as ipythondisplay
 from IPython.display import HTML
 from IPython.display import Image as ipythonimage
 import cv2
-
+import logging
 
 # adapted from https://www.pyimagesearch.com/2016/04/25/watermarking-images-with-opencv-and-python/
 def get_watermarked(pil_image: Image) -> Image:
@@ -62,7 +58,7 @@ class ModelImageVisualizer:
         return PIL.Image.open(path).convert('RGB')
 
     def _get_image_from_url(self, url: str) -> Image:
-        response = requests.get(url, timeout=30, headers={'Accept': '*/*;q=0.8'})
+        response = requests.get(url, timeout=30, headers={'user-agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/62.0.3202.94 Safari/537.36'})
         img = PIL.Image.open(BytesIO(response.content)).convert('RGB')
         return img
 
@@ -71,7 +67,7 @@ class ModelImageVisualizer:
         url: str,
         path: str = 'test_images/image.png',
         results_dir:Path = None,
-        figsize: (int, int) = (20, 20),
+        figsize: Tuple[int, int] = (20, 20),
         render_factor: int = None,
         
         display_render_factor: bool = False,
@@ -96,7 +92,7 @@ class ModelImageVisualizer:
         self,
         path: str,
         results_dir:Path = None,
-        figsize: (int, int) = (20, 20),
+        figsize: Tuple[int, int] = (20, 20),
         render_factor: int = None,
         display_render_factor: bool = False,
         compare: bool = False,
@@ -124,7 +120,7 @@ class ModelImageVisualizer:
 
     def _plot_comparison(
         self,
-        figsize: (int, int),
+        figsize: Tuple[int, int],
         render_factor: int,
         display_render_factor: bool,
         orig: Image,
@@ -148,7 +144,7 @@ class ModelImageVisualizer:
 
     def _plot_solo(
         self,
-        figsize: (int, int),
+        figsize: Tuple[int, int],
         render_factor: int,
         display_render_factor: bool,
         result: Image,
@@ -205,7 +201,7 @@ class ModelImageVisualizer:
                 backgroundcolor='black',
             )
 
-    def _get_num_rows_columns(self, num_images: int, max_columns: int) -> (int, int):
+    def _get_num_rows_columns(self, num_images: int, max_columns: int) -> Tuple[int, int]:
         columns = min(num_images, max_columns)
         rows = num_images // columns
         rows = rows if rows * columns == num_images else rows + 1
@@ -227,8 +223,21 @@ class VideoColorizer:
             if re.search('.*?\.jpg', f):
                 os.remove(os.path.join(dir, f))
 
+    def _get_ffmpeg_probe(self, path:Path):
+        try:
+            probe = ffmpeg.probe(str(path))
+            return probe
+        except ffmpeg.Error as e:
+            logging.error("ffmpeg error: {0}".format(e), exc_info=True)
+            logging.error('stdout:' + e.stdout.decode('UTF-8'))
+            logging.error('stderr:' + e.stderr.decode('UTF-8'))
+            raise e
+        except Exception as e:
+            logging.error('Failed to instantiate ffmpeg.probe.  Details: {0}'.format(e), exc_info=True)   
+            raise e
+
     def _get_fps(self, source_path: Path) -> str:
-        probe = ffmpeg.probe(str(source_path))
+        probe = self._get_ffmpeg_probe(source_path)
         stream_data = next(
             (stream for stream in probe['streams'] if stream['codec_type'] == 'video'),
             None,
@@ -253,9 +262,26 @@ class VideoColorizer:
         bwframe_path_template = str(bwframes_folder / '%5d.jpg')
         bwframes_folder.mkdir(parents=True, exist_ok=True)
         self._purge_images(bwframes_folder)
-        ffmpeg.input(str(source_path)).output(
-            str(bwframe_path_template), format='image2', vcodec='mjpeg', qscale=0
-        ).run(capture_stdout=True)
+
+        process = (
+            ffmpeg
+                .input(str(source_path))
+                .output(str(bwframe_path_template), format='image2', vcodec='mjpeg', **{'q:v':'0'})
+                .global_args('-hide_banner')
+                .global_args('-nostats')
+                .global_args('-loglevel', 'error')
+        )
+
+        try:
+            process.run()
+        except ffmpeg.Error as e:
+            logging.error("ffmpeg error: {0}".format(e), exc_info=True)
+            logging.error('stdout:' + e.stdout.decode('UTF-8'))
+            logging.error('stderr:' + e.stderr.decode('UTF-8'))
+            raise e
+        except Exception as e:
+            logging.error('Errror while extracting raw frames from source video.  Details: {0}'.format(e), exc_info=True)   
+            raise e
 
     def _colorize_raw_frames(
         self, source_path: Path, render_factor: int = None, post_process: bool = True,
@@ -286,12 +312,25 @@ class VideoColorizer:
             colorized_path.unlink()
         fps = self._get_fps(source_path)
 
-        ffmpeg.input(
-            str(colorframes_path_template),
-            format='image2',
-            vcodec='mjpeg',
-            framerate=fps,
-        ).output(str(colorized_path), crf=17, vcodec='libx264').run(capture_stdout=True)
+        process = (
+            ffmpeg 
+                .input(str(colorframes_path_template), format='image2', vcodec='mjpeg', framerate=fps) 
+                .output(str(colorized_path), crf=17, vcodec='libx264')
+                .global_args('-hide_banner')
+                .global_args('-nostats')
+                .global_args('-loglevel', 'error')
+        )
+
+        try:
+            process.run()
+        except ffmpeg.Error as e:
+            logging.error("ffmpeg error: {0}".format(e), exc_info=True)
+            logging.error('stdout:' + e.stdout.decode('UTF-8'))
+            logging.error('stderr:' + e.stderr.decode('UTF-8'))
+            raise e
+        except Exception as e:
+            logging.error('Errror while building output video.  Details: {0}'.format(e), exc_info=True)   
+            raise e
 
         result_path = self.result_folder / source_path.name
         if result_path.exists():
@@ -310,9 +349,12 @@ class VideoColorizer:
             + '" -vn -acodec copy "'
             + str(audio_file)
             + '"'
+            + ' -hide_banner'
+            + ' -nostats'
+            + ' -loglevel error'
         )
 
-        if audio_file.exists:
+        if audio_file.exists():
             os.system(
                 'ffmpeg -y -i "'
                 + str(colorized_path)
@@ -321,8 +363,11 @@ class VideoColorizer:
                 + '" -shortest -c:v copy -c:a aac -b:a 256k "'
                 + str(result_path)
                 + '"'
+                + ' -hide_banner'
+                + ' -nostats'
+                + ' -loglevel error'
             )
-        print('Video created here: ' + str(result_path))
+        logging.info('Video created here: ' + str(result_path))
         return result_path
 
     def colorize_from_url(
